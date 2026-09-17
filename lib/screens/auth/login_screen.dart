@@ -45,7 +45,7 @@ class _LoginScreenState extends State<LoginScreen> {
     final opCode = _opCodeController.text.trim();
 
     if (identifier.isEmpty || password.isEmpty) {
-      _showMsg('Masukkan email/nama pengguna dan kata sandi.');
+      _showMsg('Masukkan email dan kata sandi.');
       return;
     }
 
@@ -125,7 +125,7 @@ class _LoginScreenState extends State<LoginScreen> {
       if (e is ApiException) {
         _showMsg(e.message);
       } else {
-        _showMsg('Email / Nama pengguna atau kata sandi salah.');
+        _showMsg('Email atau kata sandi salah.');
       }
     }
   }
@@ -178,16 +178,17 @@ class _LoginScreenState extends State<LoginScreen> {
                     style: TextStyle(color: AppColors.textGrey, fontSize: 13),
                   ),
                   const SizedBox(height: 24),
-                  const Text('Nama Pengguna',
+                  const Text('Email',
                       style: TextStyle(
                           fontSize: 13, fontWeight: FontWeight.w600)),
                   const SizedBox(height: 6),
                   TextField(
                     controller: _userController,
+                    keyboardType: TextInputType.emailAddress,
                     textInputAction: TextInputAction.next,
                     decoration: InputDecoration(
-                      hintText: 'Masukkan nama pengguna',
-                      prefixIcon: const Icon(Icons.person_outline),
+                      hintText: 'Masukkan email',
+                      prefixIcon: const Icon(Icons.email_outlined),
                       filled: true,
                       fillColor: Colors.white,
                       border: OutlineInputBorder(

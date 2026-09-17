@@ -13,7 +13,6 @@ class RegisterScreen extends StatefulWidget {
 class _RegisterScreenState extends State<RegisterScreen> {
   final ApiService _apiService = ApiService();
   final _nameController = TextEditingController();
-  final _userController = TextEditingController();
   final _emailController = TextEditingController();
   final _passController = TextEditingController();
   final _confirmPassController = TextEditingController();
@@ -28,7 +27,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
   @override
   void dispose() {
     _nameController.dispose();
-    _userController.dispose();
     _emailController.dispose();
     _passController.dispose();
     _confirmPassController.dispose();
@@ -51,16 +49,17 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   Future<void> _register() async {
     final name = _nameController.text.trim();
-    final username = _userController.text.trim();
     final email = _emailController.text.trim();
     final password = _passController.text.trim();
     final confirmPass = _confirmPassController.text.trim();
     final opCode = _operatorCodeController.text.trim();
 
-    if (name.isEmpty || username.isEmpty || email.isEmpty || password.isEmpty) {
+    if (name.isEmpty || email.isEmpty || password.isEmpty) {
       _showMsg('Mohon lengkapi semua kolom.');
       return;
     }
+
+    final username = email.contains('@') ? email.split('@')[0] : email;
 
     if (_selectedRole == 'operator') {
       if (opCode.isEmpty) {
@@ -132,7 +131,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
       if (success) {
         _showMsg('Pendaftaran tersimpan secara offline.', isError: false);
-        Navigator.of(context).pop(username);
+        Navigator.of(context).pop(email);
       } else {
         _showMsg('Gagal mendaftarkan akun: ${e.toString()}');
       }
@@ -313,26 +312,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     decoration: InputDecoration(
                       hintText: 'Contoh: Ahmad Maulana',
                       prefixIcon: const Icon(Icons.badge_outlined),
-                      filled: true,
-                      fillColor: Colors.white,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                        borderSide: const BorderSide(color: AppColors.border),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-
-                  // Username
-                  const Text('Nama Pengguna (Username)',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 6),
-                  TextField(
-                    controller: _userController,
-                    textInputAction: TextInputAction.next,
-                    decoration: InputDecoration(
-                      hintText: 'Contoh: maulana',
-                      prefixIcon: const Icon(Icons.person_outline),
                       filled: true,
                       fillColor: Colors.white,
                       border: OutlineInputBorder(
