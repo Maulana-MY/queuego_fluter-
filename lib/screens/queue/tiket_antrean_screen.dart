@@ -3,7 +3,11 @@ import '../../constants/app_colors.dart';
 import '../../models/counter_model.dart';
 import '../../models/queue_model.dart';
 import '../../models/queue_status.dart';
+import '../../services/api_service.dart';
+import '../../services/storage_service.dart';
 import '../../utils/date_formatter.dart';
+import '../../widgets/queue_status_stepper.dart';
+import 'status_antrean_screen.dart';
 
 class TiketAntreanPage extends StatelessWidget {
   final Queue queue;
@@ -16,6 +20,50 @@ class TiketAntreanPage extends StatelessWidget {
     required this.counter,
     required this.aheadCount,
   });
+
+  Future<void> _cancelQueue(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text(
+          'Batalkan Antrean?',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        content: Text(
+          'Apakah Anda yakin ingin membatalkan antrean nomor ${queue.queueNumber}? Setelah dibatalkan, Anda dapat mengambil antrean baru.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Tidak'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: AppColors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Ya, Batalkan'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      try {
+        final apiService = ApiService();
+        await apiService.skipQueue(queue.id);
+      } catch (_) {}
+      await StorageService.clearActiveQueue();
+
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Antrean ${queue.queueNumber} berhasil dibatalkan.'),
+          backgroundColor: AppColors.green,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      Navigator.of(context).popUntil((route) => route.isFirst);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -98,6 +146,8 @@ class TiketAntreanPage extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 18),
+                  QueueStatusStepper(status: queue.status),
+                  const SizedBox(height: 14),
                   Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(18),
@@ -174,15 +224,67 @@ class TiketAntreanPage extends StatelessWidget {
                           borderRadius: BorderRadius.circular(14),
                         ),
                       ),
-                      onPressed: () => Navigator.of(context).pop(),
-                      icon: const Icon(Icons.arrow_back_rounded),
+                      onPressed: () {
+                        Navigator.of(context).pushReplacement(
+                          MaterialPageRoute(
+                            builder: (_) => StatusAntreanScreen(
+                              queue: queue,
+                              counter: counter,
+                            ),
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.notifications_active_rounded),
                       label: const Text(
-                        'Kembali ke Beranda',
+                        'Pantau Status Realtime',
                         style: TextStyle(
                             fontWeight: FontWeight.w700, fontSize: 15),
                       ),
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: AppColors.border),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(Icons.arrow_back_rounded),
+                      label: const Text(
+                        'Kembali ke Beranda',
+                        style: TextStyle(
+                            fontWeight: FontWeight.w600, fontSize: 14),
+                      ),
+                    ),
+                  ),
+                  if (queue.status == QueueStatus.waiting) ...[
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 50,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: AppColors.red,
+                          side: const BorderSide(color: AppColors.red),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                        onPressed: () => _cancelQueue(context),
+                        icon: const Icon(Icons.cancel_outlined),
+                        label: const Text(
+                          'Batalkan Antrean',
+                          style: TextStyle(
+                              fontWeight: FontWeight.w700, fontSize: 14),
+                        ),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                 ],
               ),

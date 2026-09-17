@@ -1,12 +1,18 @@
-/// Konfigurasi API untuk QueueGo Backend (Go API)
-/// Base URL: http://139.190.96.203:8095
 class ApiConfig {
-  // Pilihan Base URL:
-  // - Android Emulator (Backend Go di laptop): 'http://10.0.2.2:8095'
-  // - HP Fisik via WiFi (Backend Go di laptop): 'http://172.16.253.199:8095'
-  // - Windows / Chrome Web: 'http://localhost:8095'
-  // - VPS Online: 'http://139.190.96.203:8095'
-  static const String baseUrl = 'http://172.16.253.199:8095';
+  // Custom Base URL override yang bisa diubah saat runtime
+  static String? _overrideBaseUrl;
+
+  static void setCustomBaseUrl(String url) {
+    if (url.trim().isNotEmpty) {
+      _overrideBaseUrl = url.trim();
+    } else {
+      _overrideBaseUrl = null;
+    }
+  }
+
+  // Production Vercel Backend Go Base URL
+  static String get baseUrl => _overrideBaseUrl ?? 'https://queuego-backend.vercel.app';
+
 
   // Timeout dalam detik
   static const int timeout = 30;

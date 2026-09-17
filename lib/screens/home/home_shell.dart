@@ -11,6 +11,10 @@ import '../../utils/date_formatter.dart';
 import '../auth/login_screen.dart';
 import '../queue/ambil_antrean_screen.dart';
 import '../queue/tiket_antrean_screen.dart';
+import '../../services/storage_service.dart';
+import '../../widgets/queue_status_stepper.dart';
+import '../../services/tts_service.dart';
+import '../../screens/operator/operator_panel_page.dart';
 
 class HomeShell extends StatefulWidget {
   final UserModel currentUser;
@@ -35,20 +39,22 @@ class _HomeShellState extends State<HomeShell> {
   ];
 
   final List<Queue> queues = [];
+  final DateTime now = DateTime.now();
 
   int? selectedCounterId;
   int nextQueueId = 1;
   Queue? myQueue;
   String historyFilter = 'Semua';
-  bool _isLoadingFromApi = false;
-  String? _apiError;
   Timer? _autoRefreshTimer;
+  List<int> _myHistoryIds = [];
 
   @override
   void initState() {
     super.initState();
     selectedCounterId = counters.isNotEmpty ? counters.first.id : null;
     _initTts();
+    _loadUserHistoryIds();
+    _loadSavedActiveQueue();
     _loadFromApi();
     // Auto-refresh setiap 5 detik agar antrean dari user lain langsung muncul di operator
     _autoRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
@@ -56,12 +62,37 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
-  Future<void> _loadFromApi() async {
-    setState(() {
-      _isLoadingFromApi = true;
-      _apiError = null;
-    });
+  Future<void> _loadUserHistoryIds() async {
+    final ids = await StorageService.getUserHistoryQueueIds(
+      username: widget.currentUser.username,
+    );
+    if (mounted) {
+      setState(() {
+        _myHistoryIds = ids;
+      });
+    }
+  }
 
+  Future<void> _loadSavedActiveQueue() async {
+    final saved = await StorageService.getActiveQueue();
+    if (mounted) {
+      setState(() {
+        if (saved != null &&
+            (saved.status == QueueStatus.waiting ||
+                saved.status == QueueStatus.calling ||
+                saved.status == QueueStatus.serving)) {
+          myQueue = saved;
+        } else {
+          myQueue = null;
+          if (saved != null) {
+            StorageService.clearActiveQueue();
+          }
+        }
+      });
+    }
+  }
+
+  Future<void> _loadFromApi() async {
     try {
       // Fetch counters from API
       final apiCounters = await _apiService.getCounters();
@@ -83,14 +114,9 @@ class _HomeShellState extends State<HomeShell> {
         queues.addAll(apiQueues);
         nextQueueId = queues.isNotEmpty ? queues.map((q) => q.id).reduce((a, b) => a > b ? a : b) + 1 : 1;
       });
-    } catch (e) {
-      setState(() {
-        _apiError = 'Gagal terhubung ke server: ${e.toString()}';
-      });
+    } catch (_) {
       // Fallback: use sample data if API fails
       _initSampleData();
-    } finally {
-      if (mounted) setState(() => _isLoadingFromApi = false);
     }
   }
 
@@ -102,6 +128,15 @@ class _HomeShellState extends State<HomeShell> {
   /// Dipanggil secara otomatis oleh timer untuk sinkronisasi real-time
   Future<void> _silentRefresh() async {
     try {
+      final savedActive = await StorageService.getActiveQueue();
+      if (savedActive == null) {
+        if (myQueue != null && mounted) {
+          setState(() {
+            myQueue = null;
+          });
+        }
+      }
+
       final apiQueues = await _apiService.getQueuesToday();
       if (mounted) {
         setState(() {
@@ -109,6 +144,43 @@ class _HomeShellState extends State<HomeShell> {
           queues.addAll(apiQueues);
           if (queues.isNotEmpty) {
             nextQueueId = queues.map((q) => q.id).reduce((a, b) => a > b ? a : b) + 1;
+          }
+          if (myQueue != null) {
+            final oldStatus = myQueue!.status;
+            final oldCalledAt = myQueue!.calledAt;
+            final latest = apiQueues.firstWhere(
+              (q) => q.id == myQueue!.id,
+              orElse: () => myQueue!,
+            );
+            if (latest.status == QueueStatus.cancelled ||
+                latest.status == QueueStatus.skipped ||
+                latest.status == QueueStatus.completed) {
+              myQueue = null;
+              StorageService.clearActiveQueue();
+            } else {
+              final bool isRecall = latest.status == QueueStatus.calling &&
+                  oldCalledAt != null &&
+                  latest.calledAt != null &&
+                  latest.calledAt!.isAfter(oldCalledAt);
+
+              final bool isFirstCall =
+                  oldStatus != QueueStatus.calling && latest.status == QueueStatus.calling;
+
+              myQueue = latest;
+
+              if (isFirstCall || isRecall) {
+                final counter = counters.firstWhere(
+                  (c) => c.id == latest.counterId,
+                  orElse: () => Counter(id: latest.counterId, name: 'Loket ${latest.counterId}', isActive: true),
+                );
+                TtsService().speakQueueCall(
+                  queueId: latest.id,
+                  queueNumber: latest.queueNumber,
+                  counterName: counter.name,
+                  isRecall: isRecall,
+                );
+              }
+            }
           }
         });
       }
@@ -119,7 +191,7 @@ class _HomeShellState extends State<HomeShell> {
 
   void _initSampleData() {
     // Add a few initial demo waiting queues so operator and monitor have immediate live data
-    final now = DateTime.now();
+
     queues.addAll([
       Queue(
         id: nextQueueId++,
@@ -222,7 +294,7 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   bool _isToday(DateTime date) {
-    final now = DateTime.now();
+
     return date.year == now.year &&
         date.month == now.month &&
         date.day == now.day;
@@ -252,10 +324,15 @@ class _HomeShellState extends State<HomeShell> {
       queues.add(queue);
       myQueue = queue;
     });
+    StorageService.saveActiveQueue(queue);
+    StorageService.addUserHistoryQueueId(queue.id, username: widget.currentUser.username);
+    _loadUserHistoryIds();
 
     // Sinkronisasi buat antrean ke Go Backend API
     _apiService.createQueue(counterId: counterId, customerName: customerName).then((apiQueue) {
       if (mounted) {
+        StorageService.addUserHistoryQueueId(apiQueue.id, username: widget.currentUser.username);
+        _loadUserHistoryIds();
         setState(() {
           final idx = queues.indexWhere((q) => q.id == queue.id);
           if (idx != -1) {
@@ -265,6 +342,7 @@ class _HomeShellState extends State<HomeShell> {
             myQueue = apiQueue;
           }
         });
+        StorageService.saveActiveQueue(apiQueue);
       }
     }).catchError((_) {});
 
@@ -273,190 +351,65 @@ class _HomeShellState extends State<HomeShell> {
 
 
   int queuesAhead(Queue queue) {
+    final int activeCounterId = int.parse(queue.counterId.toString());
     return queues
-        .where((item) =>
-            item.counterId == queue.counterId &&
-            item.status == QueueStatus.waiting &&
-            item.id < queue.id &&
-            _isToday(item.createdAt))
+        .where((item) {
+          final int itemCounterId = int.parse(item.counterId.toString());
+          return itemCounterId == activeCounterId &&
+              item.status == QueueStatus.waiting &&
+              item.id < queue.id;
+        })
         .length;
   }
 
-  Queue? currentQueue(int counterId) {
+  Queue? currentQueue(dynamic counterId) {
+    if (counterId == null) return null;
+    final int activeCounterId = int.parse(counterId.toString());
     final active = queues
-        .where((q) =>
-            q.counterId == counterId &&
-            (q.status == QueueStatus.calling ||
-                q.status == QueueStatus.serving) &&
-            _isToday(q.createdAt))
+        .where((q) {
+          final int qCounterId = int.parse(q.counterId.toString());
+          return qCounterId == activeCounterId &&
+              (q.status == QueueStatus.calling ||
+                  q.status == QueueStatus.serving);
+        })
         .toList();
     if (active.isEmpty) return null;
     active.sort((a, b) => b.id.compareTo(a.id));
     return active.first;
   }
 
-  int waitingCount(int counterId) {
+  int waitingCount(dynamic counterId) {
+    if (counterId == null) return 0;
+    final int activeCounterId = int.parse(counterId.toString());
     return queues
-        .where((q) =>
-            q.counterId == counterId &&
-            q.status == QueueStatus.waiting &&
-            _isToday(q.createdAt))
+        .where((q) {
+          final int qCounterId = int.parse(q.counterId.toString());
+          return qCounterId == activeCounterId &&
+              q.status == QueueStatus.waiting;
+        })
         .length;
   }
 
-  List<Queue> waitingListForCounter(int counterId) {
+  List<Queue> waitingListForCounter(dynamic counterId) {
+    if (counterId == null) return [];
+    final int activeCounterId = int.parse(counterId.toString());
     final waiting = queues
-        .where((q) =>
-            q.counterId == counterId &&
-            q.status == QueueStatus.waiting &&
-            _isToday(q.createdAt))
+        .where((q) {
+          final int qCounterId = int.parse(q.counterId.toString());
+          return qCounterId == activeCounterId &&
+              q.status == QueueStatus.waiting;
+        })
         .toList();
     waiting.sort((a, b) => a.id.compareTo(b.id));
     return waiting;
   }
 
-  Future<void> callNext(int counterId) async {
-    try {
-      final called = await _apiService.callNextQueue(counterId);
-      setState(() {
-        final idx = queues.indexWhere((q) => q.id == called.id);
-        if (idx != -1) {
-          queues[idx] = called;
-        } else {
-          queues.add(called);
-        }
-      });
-      await speakQueue(called);
-      showMessage('Memanggil nomor ${called.queueNumber}');
-    } catch (e) {
-      final msg = e.toString().replaceFirst('Exception: ', '');
-      // Fallback local jika offline atau server tidak merespon
-      final active = queues.where((q) =>
-          q.counterId == counterId &&
-          (q.status == QueueStatus.calling || q.status == QueueStatus.serving) &&
-          _isToday(q.createdAt));
-      for (final q in active) {
-        q.status = QueueStatus.completed;
-        q.completedAt = DateTime.now();
-      }
-
-      final waiting = waitingListForCounter(counterId);
-
-      if (waiting.isEmpty) {
-        setState(() {});
-        showMessage(msg.isNotEmpty ? msg : 'Tidak ada antrean dalam daftar tunggu untuk loket ini.');
-        return;
-      }
-
-      final next = waiting.first;
-
-      setState(() {
-        next.status = QueueStatus.calling;
-        next.calledAt = DateTime.now();
-      });
-
-      await speakQueue(next);
-      showMessage('Memanggil nomor ${next.queueNumber}');
-    }
-  }
-
-  Future<void> callSpecificQueue(Queue queue) async {
-    try {
-      final called = await _apiService.recallQueue(queue.id);
-      setState(() {
-        final idx = queues.indexWhere((q) => q.id == queue.id);
-        if (idx != -1) queues[idx] = called;
-      });
-      await speakQueue(called);
-      showMessage('Memanggil nomor ${called.queueNumber}');
-    } catch (_) {
-      final active = queues.where((q) =>
-          q.counterId == queue.counterId &&
-          (q.status == QueueStatus.calling || q.status == QueueStatus.serving) &&
-          _isToday(q.createdAt));
-      for (final q in active) {
-        q.status = QueueStatus.completed;
-        q.completedAt = DateTime.now();
-      }
-
-      setState(() {
-        queue.status = QueueStatus.calling;
-        queue.calledAt = DateTime.now();
-      });
-
-      await speakQueue(queue);
-      showMessage('Memanggil nomor ${queue.queueNumber}');
-    }
-  }
-
-  Future<void> recall(Queue queue) async {
-    try {
-      final called = await _apiService.recallQueue(queue.id);
-      setState(() {
-        final idx = queues.indexWhere((q) => q.id == queue.id);
-        if (idx != -1) queues[idx] = called;
-      });
-      await speakQueue(called);
-      showMessage('Panggilan ulang nomor ${called.queueNumber}');
-    } catch (_) {
-      setState(() {
-        queue.status = QueueStatus.calling;
-        queue.calledAt = DateTime.now();
-      });
-      await speakQueue(queue);
-      showMessage('Panggilan ulang nomor ${queue.queueNumber}');
-    }
-  }
-
-  void startServing(Queue queue) {
-    _apiService.serveQueue(queue.id).then((updated) {
-      if (mounted) {
-        setState(() {
-          final idx = queues.indexWhere((q) => q.id == queue.id);
-          if (idx != -1) queues[idx] = updated;
-        });
-      }
-    }).catchError((_) {});
-    setState(() => queue.status = QueueStatus.serving);
-    showMessage('${queue.queueNumber} mulai dilayani');
-  }
-
-  void complete(Queue queue) {
-    _apiService.completeQueue(queue.id).then((updated) {
-      if (mounted) {
-        setState(() {
-          final idx = queues.indexWhere((q) => q.id == queue.id);
-          if (idx != -1) queues[idx] = updated;
-        });
-      }
-    }).catchError((_) {});
-    setState(() {
-      queue.status = QueueStatus.completed;
-      queue.completedAt = DateTime.now();
-    });
-    showMessage('${queue.queueNumber} selesai dilayani');
-  }
-
-  void skip(Queue queue) {
-    _apiService.skipQueue(queue.id).then((updated) {
-      if (mounted) {
-        setState(() {
-          final idx = queues.indexWhere((q) => q.id == queue.id);
-          if (idx != -1) queues[idx] = updated;
-        });
-      }
-    }).catchError((_) {});
-    setState(() {
-      queue.status = QueueStatus.skipped;
-      queue.completedAt = DateTime.now();
-    });
-    showMessage('${queue.queueNumber} telah dilewati');
-  }
-
+  // --- Operator methods (callNext, recall, startServing, complete, skip) ---
+  // REMOVED: These are now handled exclusively by the React Operator Web App.
 
   Queue? get latestCalling {
     final calling = queues
-        .where((q) => q.status == QueueStatus.calling && _isToday(q.createdAt))
+        .where((q) => q.status == QueueStatus.calling)
         .toList();
     if (calling.isEmpty) return null;
     calling.sort((a, b) {
@@ -469,7 +422,7 @@ class _HomeShellState extends State<HomeShell> {
 
   List<Queue> get allWaitingList {
     final result = queues
-        .where((q) => q.status == QueueStatus.waiting && _isToday(q.createdAt))
+        .where((q) => q.status == QueueStatus.waiting)
         .toList();
     result.sort((a, b) => a.id.compareTo(b.id));
     return result;
@@ -482,17 +435,48 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   List<Queue> get history {
-    final result = queues
-        .where((q) =>
-            q.status == QueueStatus.completed ||
-            q.status == QueueStatus.skipped ||
-            q.status == QueueStatus.cancelled)
-        .toList();
+    final bool isOperator = widget.currentUser.isOperator;
+
+    if (isOperator) {
+      final result = queues
+          .where((q) =>
+              q.status == QueueStatus.completed ||
+              q.status == QueueStatus.skipped ||
+              q.status == QueueStatus.cancelled)
+          .toList();
+      result.sort((a, b) {
+        final at = a.completedAt ?? a.createdAt;
+        final bt = b.completedAt ?? b.createdAt;
+        return bt.compareTo(at);
+      });
+      if (historyFilter == 'Semua') return result;
+      final filterMap = {
+        'Selesai': QueueStatus.completed,
+        'Dilewati': QueueStatus.skipped,
+        'Dibatalkan': QueueStatus.cancelled,
+      };
+      return result.where((q) => q.status == filterMap[historyFilter]).toList();
+    }
+
+    // Khusus Pelanggan / User Biasa: HANYA antrean milik user ini sendiri
+    final curName = widget.currentUser.name.trim().toLowerCase();
+    final curUsername = widget.currentUser.username.trim().toLowerCase();
+
+    final result = queues.where((q) {
+      final bool isMyId = _myHistoryIds.contains(q.id);
+      final bool isMyName = (curName.isNotEmpty && curName != 'pengguna' && q.customerName.trim().toLowerCase() == curName) ||
+                            (curUsername.isNotEmpty && curUsername != 'tamu' && q.customerName.trim().toLowerCase() == curUsername);
+      final bool isMyActive = myQueue != null && q.id == myQueue!.id;
+
+      return isMyId || isMyName || isMyActive;
+    }).toList();
+
     result.sort((a, b) {
       final at = a.completedAt ?? a.createdAt;
       final bt = b.completedAt ?? b.createdAt;
       return bt.compareTo(at);
     });
+
     if (historyFilter == 'Semua') return result;
     final filterMap = {
       'Selesai': QueueStatus.completed,
@@ -514,7 +498,21 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  bool get _hasActiveTicket {
+    if (myQueue == null) return false;
+    final s = myQueue!.status;
+    return s == QueueStatus.waiting ||
+        s == QueueStatus.calling ||
+        s == QueueStatus.serving;
+  }
+
   void _openAmbilAntrean() {
+    if (_hasActiveTicket) {
+      _openTiket(myQueue!);
+      showMessage(
+          'Anda masih memiliki antrean aktif (${myQueue!.queueNumber}). Tidak dapat mengambil antrean baru.');
+      return;
+    }
     Navigator.of(context)
         .push(
       MaterialPageRoute(
@@ -526,6 +524,8 @@ class _HomeShellState extends State<HomeShell> {
           onSubmit: (counterId, name) => takeQueue(counterId, name),
           aheadCounter: queuesAhead,
           waitingCounter: waitingCount,
+          hasActiveTicket: _hasActiveTicket,
+          activeQueue: myQueue,
         ),
       ),
     )
@@ -536,7 +536,8 @@ class _HomeShellState extends State<HomeShell> {
 
   void _openTiket(Queue queue) {
     final counter = counters.firstWhere((c) => c.id == queue.counterId);
-    Navigator.of(context).push(
+    Navigator.of(context)
+        .push(
       MaterialPageRoute(
         builder: (_) => TiketAntreanPage(
           queue: queue,
@@ -544,7 +545,11 @@ class _HomeShellState extends State<HomeShell> {
           aheadCount: queuesAhead(queue),
         ),
       ),
-    );
+    )
+        .then((_) async {
+      await _loadSavedActiveQueue();
+      if (mounted) setState(() {});
+    });
   }
 
   void _confirmLogout() {
@@ -575,56 +580,76 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
-    final isOperator = widget.currentUser.isOperator;
+    // Check if user is operator
+    final bool isOperator = widget.currentUser.isOperator;
 
-    // Separate Navigation destinations and pages based on role
-    final List<Widget> pages = isOperator
-        ? [
-            _buildOperatorTab(),
-            _buildMonitorTab(),
-            _buildRiwayatTab(),
-          ]
-        : [
-            _buildUserHomeTab(),
-            _buildMonitorTab(),
-            _buildRiwayatTab(),
-          ];
+    if (isOperator) {
+      // Operator pages - using new dedicated pages
+      final List<Widget> pages = [
+        OperatorPanelPage(),
+        _buildMonitorTab(),
+        _buildRiwayatTab(),
+      ];
 
-    final List<NavigationDestination> destinations = isOperator
-        ? const [
-            NavigationDestination(
-              icon: Icon(Icons.support_agent_outlined),
-              selectedIcon: Icon(Icons.support_agent),
-              label: 'Operator',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.tv_outlined),
-              selectedIcon: Icon(Icons.tv),
-              label: 'Monitor',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.history_outlined),
-              selectedIcon: Icon(Icons.history),
-              label: 'Riwayat',
-            ),
-          ]
-        : const [
-            NavigationDestination(
-              icon: Icon(Icons.home_outlined),
-              selectedIcon: Icon(Icons.home),
-              label: 'Beranda',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.tv_outlined),
-              selectedIcon: Icon(Icons.tv),
-              label: 'Monitor',
-            ),
-            NavigationDestination(
-              icon: Icon(Icons.history_outlined),
-              selectedIcon: Icon(Icons.history),
-              label: 'Riwayat',
-            ),
-          ];
+      final List<NavigationDestination> destinations = const [
+        NavigationDestination(
+          icon: Icon(Icons.dashboard_outlined),
+          selectedIcon: Icon(Icons.dashboard),
+          label: 'Panel Operator',
+        ),
+        NavigationDestination(
+          icon: Icon(Icons.tv_outlined),
+          selectedIcon: Icon(Icons.tv),
+          label: 'Monitor',
+        ),
+        NavigationDestination(
+          icon: Icon(Icons.history_outlined),
+          selectedIcon: Icon(Icons.history),
+          label: 'Riwayat',
+        ),
+      ];
+
+      final safeIndex = _currentPage >= pages.length ? 0 : _currentPage;
+
+      return Scaffold(
+        body: SafeArea(
+          child: IndexedStack(
+            index: safeIndex,
+            children: pages,
+          ),
+        ),
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: safeIndex,
+          onDestinationSelected: (i) => setState(() => _currentPage = i),
+          destinations: destinations,
+        ),
+      );
+    }
+
+    // Regular user pages
+    final List<Widget> pages = [
+      _buildUserHomeTab(),
+      _buildMonitorTab(),
+      _buildRiwayatTab(),
+    ];
+
+    final List<NavigationDestination> destinations = const [
+      NavigationDestination(
+        icon: Icon(Icons.home_outlined),
+        selectedIcon: Icon(Icons.home),
+        label: 'Beranda',
+      ),
+      NavigationDestination(
+        icon: Icon(Icons.tv_outlined),
+        selectedIcon: Icon(Icons.tv),
+        label: 'Monitor',
+      ),
+      NavigationDestination(
+        icon: Icon(Icons.history_outlined),
+        selectedIcon: Icon(Icons.history),
+        label: 'Riwayat',
+      ),
+    ];
 
     final safeIndex = _currentPage >= pages.length ? 0 : _currentPage;
 
@@ -653,20 +678,24 @@ class _HomeShellState extends State<HomeShell> {
             activeQueue.status == QueueStatus.calling ||
             activeQueue.status == QueueStatus.serving);
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // User Header
-          _buildUserHeader(),
-          const SizedBox(height: 20),
+    return RefreshIndicator(
+      onRefresh: _refreshData,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // User Header
+            _buildUserHeader(),
+            const SizedBox(height: 20),
 
-          // Active Ticket Card (if exists)
-          if (hasActiveTicket) ...[
-            _buildUserActiveTicketCard(activeQueue),
-            const SizedBox(height: 18),
-          ],
+            // Active Ticket Card (if exists)
+            if (hasActiveTicket) ...[
+              _buildUserActiveTicketCard(activeQueue),
+              const SizedBox(height: 18),
+            ],
+            // ... (rest omitted, will close with paren and bracket)
 
           // Hero Button "Ambil Antrean"
           InkWell(
@@ -836,8 +865,9 @@ class _HomeShellState extends State<HomeShell> {
           const SizedBox(height: 16),
         ],
       ),
-    );
-  }
+    ),
+  );
+}
 
   Widget _buildUserHeader() {
     return Row(
@@ -885,6 +915,8 @@ class _HomeShellState extends State<HomeShell> {
       ],
     );
   }
+
+
 
   Widget _buildUserActiveTicketCard(Queue queue) {
     final counter = counters.firstWhere((c) => c.id == queue.counterId);
@@ -1004,6 +1036,8 @@ class _HomeShellState extends State<HomeShell> {
             ],
           ),
           const SizedBox(height: 12),
+          QueueStatusStepper(status: queue.status),
+          const SizedBox(height: 12),
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
@@ -1017,617 +1051,14 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+
   // ===========================================================================
-  // 2. OPERATOR TAB (Tampilan Sesuai Laravel resources/views/operator/index.blade.php)
+  // OPERATOR TAB - REMOVED
+  // All operator UI widgets (_buildOperatorTab, _buildOperatorHeader,
+  // _buildOperatorActiveCard, _buildOperatorWaitingList) have been moved
+  // to the React Operator Web App (queuegoreact).
   // ===========================================================================
-  Widget _buildOperatorTab() {
-    final selectedCounter = selectedCounterId == null
-        ? (counters.isNotEmpty ? counters.first : null)
-        : counters.firstWhere((c) => c.id == selectedCounterId,
-            orElse: () => counters.first);
 
-    final activeQueue =
-        selectedCounter == null ? null : currentQueue(selectedCounter.id);
-    final waitingList = selectedCounter == null
-        ? <Queue>[]
-        : waitingListForCounter(selectedCounter.id);
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header: Panel Operasional (matching Laravel header)
-          _buildOperatorHeader(selectedCounter, waitingList.length),
-          const SizedBox(height: 16),
-
-          // Pilihan Loket Chips (Loket Selector)
-          const Text(
-            'Pilih Loket Tugas',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 8),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: counters.map((counter) {
-                final isSelected = selectedCounter?.id == counter.id;
-                final isBusy = currentQueue(counter.id) != null;
-                final waiting = waitingCount(counter.id);
-
-                return Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: () => setState(() => selectedCounterId = counter.id),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: isSelected ? AppColors.primary : Colors.white,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: isSelected
-                              ? AppColors.primary
-                              : AppColors.border,
-                          width: isSelected ? 2 : 1,
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: isBusy
-                                  ? (isSelected
-                                      ? Colors.greenAccent
-                                      : AppColors.green)
-                                  : (isSelected
-                                      ? Colors.white54
-                                      : AppColors.textFaint),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            counter.name,
-                            style: TextStyle(
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13,
-                              color: isSelected
-                                  ? Colors.white
-                                  : AppColors.textDark,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: isSelected
-                                  ? Colors.white.withOpacity(0.2)
-                                  : const Color(0xFFEFF6FF),
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Text(
-                              '$waiting',
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w800,
-                                color: isSelected
-                                    ? Colors.white
-                                    : AppColors.primary,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              }).toList(),
-            ),
-          ),
-          const SizedBox(height: 18),
-
-          // Action: Test Voice & Manual Take Ticket
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: testVoice,
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.purple,
-                    side: const BorderSide(color: AppColors.purple),
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                  ),
-                  icon: const Icon(Icons.volume_up_rounded, size: 18),
-                  label: const Text('Tes Suara',
-                      style: TextStyle(fontSize: 12.5)),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: _openAmbilAntrean,
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                  ),
-                  icon: const Icon(Icons.add_circle_outline, size: 18),
-                  label: const Text('Ambilkan Tiket',
-                      style: TextStyle(fontSize: 12.5)),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 18),
-
-          // Active Queue Card (Matching Laravel Main Focus Box)
-          if (selectedCounter != null) ...[
-            _buildOperatorActiveCard(selectedCounter, activeQueue),
-            const SizedBox(height: 16),
-
-            // Big "PANGGIL SELANJUTNYA" Action Button (Matching Laravel)
-            SizedBox(
-              width: double.infinity,
-              height: 56,
-              child: FilledButton.icon(
-                style: FilledButton.styleFrom(
-                  backgroundColor: AppColors.primary,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                ),
-                onPressed: () => callNext(selectedCounter.id),
-                icon: const Icon(Icons.volume_up_rounded, size: 24),
-                label: const Text(
-                  'PANGGIL SELANJUTNYA',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w800,
-                    fontSize: 15,
-                    letterSpacing: 0.5,
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 22),
-
-            // Waiting List Section (Matching Laravel Waiting List for this Loket)
-            _buildOperatorWaitingList(selectedCounter, waitingList),
-          ],
-          const SizedBox(height: 16),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildOperatorHeader(Counter? counter, int waitingCount) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: const Color(0xFFEFF6FF),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: const Icon(Icons.support_agent_rounded,
-                color: AppColors.primary, size: 24),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Panel Operasional',
-                  style: TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w800,
-                    color: AppColors.textDark,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Row(
-                  children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: AppColors.green,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Aktif: ${counter?.name ?? "-"}',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.textGrey,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: const Color(0xFFFFF7ED),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: const Color(0xFFFFEDD5)),
-            ),
-            child: Text(
-              '$waitingCount Menunggu',
-              style: const TextStyle(
-                color: AppColors.orange,
-                fontWeight: FontWeight.w800,
-                fontSize: 11.5,
-              ),
-            ),
-          ),
-          const SizedBox(width: 4),
-          IconButton(
-            tooltip: 'Keluar',
-            onPressed: _confirmLogout,
-            icon: const Icon(Icons.logout_rounded, color: AppColors.textGrey),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildOperatorActiveCard(Counter counter, Queue? queue) {
-    if (queue == null) {
-      return Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(32),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: AppColors.border),
-        ),
-        child: Column(
-          children: [
-            Container(
-              width: 54,
-              height: 54,
-              decoration: BoxDecoration(
-                color: const Color(0xFFF1F5F9),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: const Icon(Icons.people_outline_rounded,
-                  size: 30, color: AppColors.textFaint),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Belum Ada Antrean Aktif',
-              style: TextStyle(
-                fontWeight: FontWeight.w700,
-                fontSize: 16,
-                color: AppColors.textDark,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Tekan tombol "Panggil Selanjutnya" untuk memanggil antrean di ${counter.name}.',
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: AppColors.textGrey, fontSize: 12),
-            ),
-          ],
-        ),
-      );
-    }
-
-    final isCalling = queue.status == QueueStatus.calling;
-    final isServing = queue.status == QueueStatus.serving;
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: isCalling ? AppColors.orange : AppColors.green,
-          width: 2,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: (isCalling ? AppColors.orange : AppColors.green)
-                .withOpacity(0.12),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          // Status Pill Badge
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
-            decoration: BoxDecoration(
-              color: (isCalling ? AppColors.orange : AppColors.green)
-                  .withOpacity(0.12),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  isCalling
-                      ? Icons.volume_up_rounded
-                      : Icons.room_service_rounded,
-                  size: 14,
-                  color: isCalling ? AppColors.orange : AppColors.green,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  isCalling ? 'SEDANG DIPANGGIL' : 'SEDANG DILAYANI',
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w800,
-                    color: isCalling ? AppColors.orange : AppColors.green,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          // Large Queue Number (Matching Laravel)
-          FittedBox(
-            child: Text(
-              queue.queueNumber,
-              style: const TextStyle(
-                fontSize: 54,
-                fontWeight: FontWeight.w900,
-                color: AppColors.primary,
-                letterSpacing: 1.2,
-              ),
-            ),
-          ),
-          const SizedBox(height: 4),
-
-          // Customer Name & Loket
-          Text(
-            queue.customerName,
-            style: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
-              color: AppColors.textDark,
-            ),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'Loket: ${counter.name} • ${formatTime(queue.calledAt ?? queue.createdAt)}',
-            style: const TextStyle(
-              fontSize: 12,
-              color: AppColors.textGrey,
-            ),
-          ),
-          const SizedBox(height: 18),
-
-          // Operator Control Action Buttons (Matching Laravel: Panggil Ulang, Mulai Melayani / Selesai, Lewati)
-          Row(
-            children: [
-              // Panggil Ulang (Recall)
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () => recall(queue),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.orange,
-                    side: const BorderSide(color: AppColors.orange),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                  ),
-                  icon: const Icon(Icons.replay_rounded, size: 17),
-                  label: const Text(
-                    'Panggil Ulang',
-                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-
-              // Mulai Melayani / Selesai
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: isCalling
-                      ? () => startServing(queue)
-                      : () => complete(queue),
-                  style: FilledButton.styleFrom(
-                    backgroundColor: AppColors.green,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                  ),
-                  icon: Icon(
-                    isCalling ? Icons.play_arrow_rounded : Icons.check_circle_rounded,
-                    size: 17,
-                  ),
-                  label: Text(
-                    isCalling ? 'Mulai Layani' : 'Selesai',
-                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-
-              // Lewati (Skip)
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () => skip(queue),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.red,
-                    side: const BorderSide(color: AppColors.red),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                  ),
-                  icon: const Icon(Icons.skip_next_rounded, size: 17),
-                  label: const Text(
-                    'Lewati',
-                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildOperatorWaitingList(Counter counter, List<Queue> waitingList) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                'Daftar Tunggu (${counter.name})',
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w800,
-                  color: AppColors.textDark,
-                ),
-              ),
-              Text(
-                '${waitingList.length} Antrean',
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.textGrey,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          if (waitingList.isEmpty)
-            Container(
-              padding: const EdgeInsets.all(20),
-              alignment: Alignment.center,
-              child: const Text(
-                'Tidak ada antrean yang sedang menunggu di loket ini.',
-                style: TextStyle(
-                  color: AppColors.textFaint,
-                  fontSize: 12,
-                  fontStyle: FontStyle.italic,
-                ),
-                textAlign: TextAlign.center,
-              ),
-            )
-          else
-            ListView.separated(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: waitingList.length,
-              separatorBuilder: (_, __) => const Divider(height: 16),
-              itemBuilder: (context, index) {
-                final item = waitingList[index];
-                return Row(
-                  children: [
-                    Container(
-                      width: 32,
-                      height: 32,
-                      decoration: const BoxDecoration(
-                        color: Color(0xFFEFF6FF),
-                        shape: BoxShape.circle,
-                      ),
-                      alignment: Alignment.center,
-                      child: Text(
-                        '${index + 1}',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 12,
-                          color: AppColors.primary,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            item.queueNumber,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w800,
-                              fontSize: 14,
-                              color: AppColors.textDark,
-                            ),
-                          ),
-                          Text(
-                            '${item.customerName} • ${formatTime(item.createdAt)}',
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: AppColors.textGrey,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    InkWell(
-                      borderRadius: BorderRadius.circular(8),
-                      onTap: () => callSpecificQueue(item),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: AppColors.primary.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: const Row(
-                          children: [
-                            Icon(Icons.volume_up_rounded,
-                                size: 14, color: AppColors.primary),
-                            SizedBox(width: 4),
-                            Text(
-                              'Panggil',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w700,
-                                color: AppColors.primary,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
-        ],
-      ),
-    );
-  }
 
   // ===========================================================================
   // 3. MONITOR TAB (Layar Monitor Antrean Real-Time)
@@ -1644,23 +1075,25 @@ class _HomeShellState extends State<HomeShell> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Monitor Antrean',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w800,
-                      color: AppColors.textDark,
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Monitor Antrean',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.textDark,
+                      ),
                     ),
-                  ),
-                  SizedBox(height: 2),
-                  Text(
-                    'Tampilan real-time nomor panggilan dan status loket',
-                    style: TextStyle(fontSize: 12, color: AppColors.textGrey),
-                  ),
-                ],
+                    SizedBox(height: 2),
+                    Text(
+                      'Tampilan real-time nomor panggilan dan status loket',
+                      style: TextStyle(fontSize: 12, color: AppColors.textGrey),
+                    ),
+                  ],
+                ),
               ),
               IconButton(
                 tooltip: 'Tes Suara',
@@ -2030,24 +1463,27 @@ class _HomeShellState extends State<HomeShell> {
   // ===========================================================================
   Widget _buildRiwayatTab() {
     final data = history;
+    final bool isOperator = widget.currentUser.isOperator;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Riwayat Antrean',
-            style: TextStyle(
+          Text(
+            isOperator ? 'Riwayat Antrean Seluruh Loket' : 'Riwayat Antrean Saya',
+            style: const TextStyle(
               fontSize: 20,
               fontWeight: FontWeight.w800,
               color: AppColors.textDark,
             ),
           ),
           const SizedBox(height: 2),
-          const Text(
-            'Daftar antrean yang telah selesai diproses atau dilewati',
-            style: TextStyle(fontSize: 12, color: AppColors.textGrey),
+          Text(
+            isOperator
+                ? 'Daftar antrean seluruh loket yang telah selesai diproses atau dilewati'
+                : 'Daftar riwayat antrean milik ${widget.currentUser.name}',
+            style: const TextStyle(fontSize: 12, color: AppColors.textGrey),
           ),
           const SizedBox(height: 16),
 
@@ -2079,8 +1515,10 @@ class _HomeShellState extends State<HomeShell> {
           if (data.isEmpty)
             _emptyContainer(
               Icons.history_rounded,
-              'Belum Ada Riwayat Antrean',
-              'Antrean yang selesai atau dilewati akan muncul di sini.',
+              isOperator ? 'Belum Ada Riwayat Antrean' : 'Belum Ada Riwayat Antrean Saya',
+              isOperator
+                  ? 'Antrean yang selesai atau dilewati akan muncul di sini.'
+                  : 'Nomor antrean yang Anda ambil akan muncul di riwayat ini.',
             )
           else
             ListView.separated(
@@ -2090,70 +1528,76 @@ class _HomeShellState extends State<HomeShell> {
               separatorBuilder: (_, __) => const SizedBox(height: 10),
               itemBuilder: (context, index) {
                 final item = data[index];
-                final counter =
-                    counters.firstWhere((c) => c.id == item.counterId);
+                final counter = counters.firstWhere(
+                  (c) => c.id == item.counterId,
+                  orElse: () => Counter(id: item.counterId, name: 'Loket ${item.counterId}'),
+                );
                 final color = item.status.color;
 
-                return Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: AppColors.border),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 72,
-                        child: Text(
-                          item.queueNumber,
-                          style: const TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w900,
-                            color: AppColors.primary,
+                return InkWell(
+                  onTap: () => _openTiket(item),
+                  borderRadius: BorderRadius.circular(14),
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 72,
+                          child: Text(
+                            item.queueNumber,
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w900,
+                              color: AppColors.primary,
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              item.customerName,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 13.5,
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                item.customerName,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 13.5,
+                                ),
                               ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              '${counter.name} • ${formatTime(item.createdAt)} - ${formatTime(item.completedAt ?? item.createdAt)}',
-                              style: const TextStyle(
-                                fontSize: 11,
-                                color: AppColors.textGrey,
+                              const SizedBox(height: 2),
+                              Text(
+                                '${counter.name} • ${formatTime(item.createdAt)}',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: AppColors.textGrey,
+                                ),
                               ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 9, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: color.withOpacity(0.12),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Text(
-                          item.status.label,
-                          style: TextStyle(
-                            color: color,
-                            fontSize: 10.5,
-                            fontWeight: FontWeight.w800,
+                            ],
                           ),
                         ),
-                      ),
-                    ],
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 9, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: color.withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Text(
+                            item.status.label,
+                            style: TextStyle(
+                              color: color,
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 );
               },
@@ -2199,3 +1643,4 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 }
+

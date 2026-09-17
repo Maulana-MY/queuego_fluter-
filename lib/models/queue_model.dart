@@ -1,5 +1,7 @@
 import 'queue_status.dart';
 
+typedef QueueModel = Queue;
+
 class Queue {
   final int id;
   final int counterId;
@@ -23,14 +25,24 @@ class Queue {
 
   factory Queue.fromJson(Map<String, dynamic> json) {
     return Queue(
-      id: int.tryParse(json['id'].toString()) ?? 0,
-      counterId: int.tryParse(json['counter_id'].toString()) ?? 0,
-      queueNumber: json['queue_number'] ?? '',
-      customerName: json['customer_name'] ?? 'Tamu',
-      status: (json['status'] ?? 'waiting').toQueueStatus(),
-      createdAt: DateTime.tryParse(json['created_at'] ?? '') ?? DateTime.now(),
-      calledAt: json['called_at'] != null ? DateTime.tryParse(json['called_at']) : null,
-      completedAt: json['completed_at'] != null ? DateTime.tryParse(json['completed_at']) : null,
+      id: json['id'] is int
+          ? json['id']
+          : int.tryParse(json['id']?.toString() ?? '0') ?? 0,
+      counterId: json['counter_id'] is int
+          ? json['counter_id']
+          : int.tryParse(json['counter_id']?.toString() ?? '0') ?? 0,
+      queueNumber: json['queue_number']?.toString() ?? '',
+      customerName: json['customer_name']?.toString() ?? 'Pelanggan',
+      status: (json['status']?.toString() ?? 'waiting').toQueueStatus(),
+      createdAt: json['created_at'] != null
+          ? (DateTime.tryParse(json['created_at'].toString())?.toLocal() ?? DateTime.now())
+          : DateTime.now(),
+      calledAt: json['called_at'] != null
+          ? DateTime.tryParse(json['called_at'].toString())?.toLocal()
+          : null,
+      completedAt: json['completed_at'] != null
+          ? DateTime.tryParse(json['completed_at'].toString())?.toLocal()
+          : null,
     );
   }
 

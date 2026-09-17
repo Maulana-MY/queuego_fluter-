@@ -131,6 +131,19 @@ class UserStore {
     return guest;
   }
 
+  static UserModel loginGoogle({required String name, required String email}) {
+    final username = email.split('@')[0];
+    final user = UserModel(
+      username: username,
+      name: name,
+      email: email,
+      role: 'user',
+      isOperator: false,
+    );
+    _saveUser(user);
+    return user;
+  }
+
   static Future<void> logout() async {
     try {
       final prefs = await SharedPreferences.getInstance();

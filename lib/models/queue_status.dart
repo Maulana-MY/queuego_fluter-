@@ -34,7 +34,7 @@ extension QueueStatusX on QueueStatus {
       case QueueStatus.cancelled:
         return AppColors.red;
       case QueueStatus.skipped:
-        return AppColors.orange;
+        return AppColors.red;
     }
   }
 
@@ -69,3 +69,4 @@ extension QueueStatusString on String {
     };
   }
 }
+

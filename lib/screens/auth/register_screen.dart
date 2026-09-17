@@ -18,9 +18,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _passController = TextEditingController();
   final _confirmPassController = TextEditingController();
 
+  final _operatorCodeController = TextEditingController();
   String _selectedRole = 'user'; // 'user' or 'operator'
   bool _obscurePass = true;
   bool _obscureConfirm = true;
+  bool _obscureOpCode = true;
   bool _loading = false;
 
   @override
@@ -30,6 +32,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     _emailController.dispose();
     _passController.dispose();
     _confirmPassController.dispose();
+    _operatorCodeController.dispose();
     _apiService.dispose();
     super.dispose();
   }
@@ -52,10 +55,22 @@ class _RegisterScreenState extends State<RegisterScreen> {
     final email = _emailController.text.trim();
     final password = _passController.text.trim();
     final confirmPass = _confirmPassController.text.trim();
+    final opCode = _operatorCodeController.text.trim();
 
     if (name.isEmpty || username.isEmpty || email.isEmpty || password.isEmpty) {
       _showMsg('Mohon lengkapi semua kolom.');
       return;
+    }
+
+    if (_selectedRole == 'operator') {
+      if (opCode.isEmpty) {
+        _showMsg('Kode Akses Operator wajib diisi!');
+        return;
+      }
+      if (opCode.trim() != 'BETA12') {
+        _showMsg('Kode Akses Operator tidak valid! Hubungi Administrator.');
+        return;
+      }
     }
 
     if (!email.contains('@') || !email.contains('.')) {
@@ -256,6 +271,37 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     ],
                   ),
                   const SizedBox(height: 16),
+
+                  if (_selectedRole == 'operator') ...[
+                    const Text(
+                      'Kode Verifikasi Operator',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: _operatorCodeController,
+                      obscureText: _obscureOpCode,
+                      textInputAction: TextInputAction.next,
+                      decoration: InputDecoration(
+                        hintText: 'Masukkan kode verifikasi operator',
+                        prefixIcon: const Icon(Icons.security_rounded),
+                        suffixIcon: IconButton(
+                          icon: Icon(_obscureOpCode
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined),
+                          onPressed: () =>
+                              setState(() => _obscureOpCode = !_obscureOpCode),
+                        ),
+                        filled: true,
+                        fillColor: Colors.white,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: const BorderSide(color: AppColors.border),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
 
                   // Full name
                   const Text('Nama Lengkap',
